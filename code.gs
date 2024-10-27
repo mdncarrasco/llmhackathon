@@ -1,3 +1,8 @@
+/**
+ * Función principal para procesar los correos electrónicos entrantes.
+ * Recorre los hilos sin etiquetas y determina la acción a tomar
+ * basándose en el último mensaje de cada hilo.
+ */
 function procesarCorreos() {
   var labelName = "PROCESSED";
   var label = getOrCreateLabel(labelName);
@@ -10,8 +15,8 @@ function procesarCorreos() {
     return;
   }
 
-  for (var i = 0; i < threads.length; i++) {
-    var thread = threads[i];
+  // Procesar cada hilo encontrado
+  threads.forEach(function(thread) {
     var mensajes = thread.getMessages();
     var ultimoMensaje = mensajes[mensajes.length - 1];
 
@@ -32,59 +37,72 @@ function procesarCorreos() {
     // Etiquetar y archivar el hilo
     label.addToThread(thread);
     thread.moveToArchive();
+  });
+}
+
+/**
+ * Obtiene una etiqueta de Gmail por su nombre o la crea si no existe.
+ *
+ * @param {string} labelName - El nombre de la etiqueta.
+ * @returns {GmailLabel} - La etiqueta de Gmail.
+ */
+function getOrCreateLabel(labelName) {
+  var label = GmailApp.getUserLabelByName(labelName);
+  if (!label) {
+    label = GmailApp.createLabel(labelName);
   }
+  return label;
 }
 
-function cerrarTicket(thread, despedida) {
-  var mensajes = thread.getMessages();
-  var ticketID = mensajes[0].getId();
-
-  // Actualizar el estado del ticket a 'CLOSED'
-  actualizarEstadoTicket(ticketID, 'CLOSED', mensajes.length);
-
-  enviarCorreoRespuesta(mensajes[0].getFrom(), despedida, mensajes[0].getSubject());
-
-  Logger.log('El ticket con ID ' + ticketID + ' ha sido cerrado.');
-}
-
-
+/**
+ * Determina la acción a realizar en base al último mensaje y el historial del hilo.
+ *
+ * @param {GmailMessage} ultimoMensaje - El último mensaje del hilo.
+ * @param {GmailMessage[]} mensajes - Todos los mensajes del hilo.
+ * @returns {Object} - Un objeto con la acción a realizar y una respuesta si corresponde.
+ */
 function determinarAccion(ultimoMensaje, mensajes) {
   var esNuevoTicket = mensajes.length === 1;
   var contenidoMensaje = ultimoMensaje.getPlainBody();
 
-  // Si es el primer mensaje del hilo, es un nuevo ticket
   if (esNuevoTicket) {
     return {
-      "Action": "CREATE",
-      "Reply": "Crea un mensaje de cierre y agradecimiento en el mismo idioma que el mensaje"
+      "Action": "CREATE"
     };
   } else {
     // Analizar el contenido del último mensaje para determinar si es cierre de ticket
     var datos = analizarCierreTicket(contenidoMensaje);
-
     return datos;
   }
 }
 
+/**
+ * Analiza el contenido del mensaje para determinar si el usuario desea cerrar el ticket o requiere una respuesta.
+ *
+ * @param {string} contenidoCorreo - El contenido del correo electrónico.
+ * @returns {Object} - Un objeto con la acción a realizar ("CLOSE" o "RESPOND") y una respuesta generada.
+ */
 function analizarCierreTicket(contenidoCorreo) {
   var apiKey = getApiKey("MISTRAL_API_KEY");
-
   var url = 'https://api.mistral.ai/v1/chat/completions';
 
   var archivo = {
-    "Action": "Analiza el contenido del mensaje e indica si el usuario quier algunas de estas dos opciones: CLOSE o RESPOND",
-    "Reply": "Crea un mensaje de cierre y agradecimiento en el mismo idioma que el mensaje"
+    "Reply": "Crea un mensaje de cierre y agradecimiento en el mismo idioma que el mensaje",
+    "Action": "Analiza el contenido del mensaje e indica si el usuario quiere alguna de estas dos opciones: CLOSE o RESPOND"
   };
 
   var payload = {
-    'model': "mistral-medium", // replace with the appropriate Mistral model
+    'model': "mistral-medium", // Reemplazar con el modelo de Mistral adecuado
     'response_format': { type: "json_object" },
     'messages': [
       {
-        'role': 'system', 'content': `Analiza el contenido del mensaje e indica si el usuario quier algunas de estas dos opciones: CLOSE o RESPOND
+        'role': 'system',
+        'content': `Analiza el contenido del mensaje e indica si el usuario quiere alguna de estas dos opciones: CLOSE o RESPOND.
 
-Message content:
-"${contenidoCorreo}" and complete the JSON object. Action attribute must be CLOSE or RESPOND.`
+Contenido del mensaje:
+"${contenidoCorreo}"
+
+Completa el objeto JSON. El atributo "Action" debe ser "CLOSE" o "RESPOND".`
       },
       { 'role': 'user', 'content': JSON.stringify(archivo) }
     ]
@@ -100,7 +118,6 @@ Message content:
     'muteHttpExceptions': true
   };
 
-
   try {
     var response = UrlFetchApp.fetch(url, options);
     var result = JSON.parse(response.getContentText());
@@ -110,27 +127,32 @@ Message content:
       var datos = JSON.parse(assistantResponse);
       return datos;
     } else {
-      Logger.log('Unexpected response format from Mistral API: ' + JSON.stringify(result));
-      return null;
+      Logger.log('Formato de respuesta inesperado de Mistral API: ' + JSON.stringify(result));
+      return { "Action": "RESPOND" };
     }
   } catch (e) {
-    Logger.log('Error calling Mistral API: ' + e);
-    return null;
+    Logger.log('Error al llamar a la API de Mistral: ' + e);
+    return { "Action": "RESPOND" };
   }
 }
 
-
-function getOrCreateLabel(labelName) {
-  var label = GmailApp.getUserLabelByName(labelName);
-  if (label == null) {
-    label = GmailApp.createLabel(labelName);
-  }
-  return label;
-}
-
+/**
+ * Crea un nuevo ticket a partir del mensaje recibido, validando que no exista ya un ticket con el mismo ID.
+ *
+ * @param {GmailMessage} mensaje - El mensaje de correo electrónico recibido.
+ */
 function crearTicket(mensaje) {
   var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
   var hoja = spreadsheet.getSheetByName('Tickets');
+
+  // Obtener el ID del mensaje
+  var mensajeId = mensaje.getId();
+
+  // Validar si ya existe un ticket con el mismo ID
+  if (ticketExiste(mensajeId)) {
+    Logger.log('El ticket con ID ' + mensajeId + ' ya existe. No se creará un nuevo ticket.');
+    return; // Salir de la función si el ticket ya existe
+  }
 
   var mensajeCompleto = mensaje.getSubject() + '\n' +
     mensaje.getFrom() + '\n' +
@@ -139,20 +161,19 @@ function crearTicket(mensaje) {
     mensaje.getPlainBody();
 
   // Obtener el enlace al mensaje
-  var mensajeId = mensaje.getId();
   var enlaceMensaje = 'https://mail.google.com/mail/u/0/#inbox/' + mensajeId;
 
-  // Enviar el contenido a Mistral
+  // Enviar el contenido a Mistral para extraer datos relevantes
   var datosExtraidos = extraerDatosConMistral(mensajeCompleto);
 
   if (datosExtraidos) {
     // Agregar los datos a la hoja de cálculo
-    var nuevaFila = hoja.appendRow([
+    hoja.appendRow([
       mensajeId,
       datosExtraidos.Info,
       datosExtraidos.Origin,
       datosExtraidos.Category,
-      1,
+      1, // Cantidad de mensajes
       datosExtraidos.Created,
       datosExtraidos.Created,
       datosExtraidos.Sender,
@@ -163,7 +184,7 @@ function crearTicket(mensaje) {
 
     // Si la categoría no es 'NOTHING TO DO WITH', enviar a CodeGPT
     if (datosExtraidos.Category !== 'NOTHING TO DO WITH') {
-      // Enviar el cuerpo del correo a CodeGPT para generar la respuesta definitiva
+      // Generar la respuesta definitiva con CodeGPT
       var respuestaDefinitiva = obtenerRespuestaCodeGPT(mensaje.getPlainBody());
 
       if (respuestaDefinitiva) {
@@ -171,18 +192,24 @@ function crearTicket(mensaje) {
         // Enviar el correo al usuario con la respuesta definitiva
         enviarCorreoRespuesta(datosExtraidos.SenderEmail || mensaje.getFrom(), respuestaHTML, mensaje.getSubject());
 
-        // Actualizar el estado a 'PENDING' en la hoja de cálculo usando el ID
-        actualizarEstadoTicket(mensajeId, 'OPEN', 3);
+        // Actualizar el estado a 'OPEN' en la hoja de cálculo
+        actualizarEstadoTicket(mensajeId, 'OPEN', 1);
       }
     } else {
-      actualizarEstadoTicket(mensajeId, 'CLOSED', 3);
+      // Si no tiene que ver con el tema, cerrar el ticket
+      actualizarEstadoTicket(mensajeId, 'CLOSED', 1);
     }
-
   } else {
-    Logger.log('No se pudieron extraer datos del correo con ID: ' + mensaje.getId());
+    Logger.log('No se pudieron extraer datos del correo con ID: ' + mensajeId);
   }
 }
 
+
+/**
+ * Procesa un hilo de correo existente para generar una respuesta al usuario.
+ *
+ * @param {GmailThread} thread - El hilo de correo a procesar.
+ */
 function procesarHilo(thread) {
   var mensajes = thread.getMessages();
   var ticketID = mensajes[0].getId();
@@ -190,28 +217,50 @@ function procesarHilo(thread) {
   var contenidoAgregado = '';
   Logger.log('Procesando el hilo con ID: ' + ticketID);
 
-  labelName = "PENDING";
-  label = getOrCreateLabel(labelName);
-  label.addToThread(thread);
-
-  for (var j = 0; j < mensajes.length; j++) {
-    var mensaje = mensajes[j];
-    // Acumular el cuerpo del mensaje
+  // Acumular el contenido de todos los mensajes
+  mensajes.forEach(function(mensaje) {
     contenidoAgregado += '\n\n' + mensaje.getPlainBody();
     mensaje.markRead();
-  }
+  });
 
-  // Enviar el contenido agregado a obtenerRespuestaCodeGPT
+  // Generar la respuesta con CodeGPT
   var respuestaDefinitiva = obtenerRespuestaCodeGPT(contenidoAgregado);
 
   if (respuestaDefinitiva) {
     var respuestaHTML = convertirMarkdownAHTML(respuestaDefinitiva);
-    // Enviar correo al usuario preguntando si desea cerrar el ticket
     enviarCorreoRespuesta(remitente, respuestaHTML, thread.getFirstMessageSubject());
   }
-  actualizarEstadoTicket(ticketID, labelName, mensajes.length + 1);
+
+  // Actualizar el estado del ticket a 'PENDING'
+  actualizarEstadoTicket(ticketID, 'PENDING', mensajes.length);
 }
 
+/**
+ * Cierra un ticket y envía un mensaje de despedida al usuario.
+ *
+ * @param {GmailThread} thread - El hilo de correo asociado al ticket.
+ * @param {string} despedida - Mensaje de cierre y agradecimiento para el usuario.
+ */
+function cerrarTicket(thread, despedida) {
+  var mensajes = thread.getMessages();
+  var ticketID = mensajes[0].getId();
+
+  // Actualizar el estado del ticket a 'CLOSED'
+  actualizarEstadoTicket(ticketID, 'CLOSED', mensajes.length);
+
+  // Enviar correo de cierre al usuario
+  enviarCorreoRespuesta(mensajes[0].getFrom(), despedida, mensajes[0].getSubject());
+
+  Logger.log('El ticket con ID ' + ticketID + ' ha sido cerrado.');
+}
+
+/**
+ * Actualiza el estado de un ticket en la hoja de cálculo.
+ *
+ * @param {string} ticketID - El ID del ticket (ID del mensaje).
+ * @param {string} nuevoEstado - El nuevo estado del ticket ('OPEN', 'PENDING', 'CLOSED').
+ * @param {number} cantidadMensajes - La cantidad total de mensajes en el hilo.
+ */
 function actualizarEstadoTicket(ticketID, nuevoEstado, cantidadMensajes) {
   var hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Tickets');
   var rangoID = hoja.getRange('A:A'); // Columna A donde están los IDs
@@ -220,16 +269,21 @@ function actualizarEstadoTicket(ticketID, nuevoEstado, cantidadMensajes) {
 
   if (celdaEncontrada) {
     var fila = celdaEncontrada.getRow();
-    hoja.getRange(fila, 9).setValue(nuevoEstado); // Columna 5 es 'Estado'
-    // Actualizar la fecha de actualización
-    var fechaActual = new Date();
-    hoja.getRange(fila, 7).setValue(fechaActual); // Columna 7 es 'Updated'
-    hoja.getRange(fila, 5).setValue(cantidadMensajes);
+    hoja.getRange(fila, 9).setValue(nuevoEstado); // Columna I es 'Estado'
+    hoja.getRange(fila, 7).setValue(new Date());  // Columna G es 'Updated'
+    hoja.getRange(fila, 5).setValue(cantidadMensajes); // Columna E es 'Cantidad de mensajes'
   } else {
     Logger.log('No se encontró el ticket con ID: ' + ticketID);
   }
 }
 
+/**
+ * Envía un correo electrónico de respuesta al usuario.
+ *
+ * @param {string} destinatario - Dirección de correo electrónico del destinatario.
+ * @param {string} contenidoRespuesta - Contenido del correo electrónico (en formato HTML).
+ * @param {string} asuntoOriginal - Asunto del mensaje original.
+ */
 function enviarCorreoRespuesta(destinatario, contenidoRespuesta, asuntoOriginal) {
   var asuntoRespuesta = 'Re: ' + asuntoOriginal;
 
@@ -240,10 +294,14 @@ function enviarCorreoRespuesta(destinatario, contenidoRespuesta, asuntoOriginal)
   });
 }
 
-
+/**
+ * Extrae datos relevantes del correo electrónico utilizando la API de Mistral.
+ *
+ * @param {string} contenidoCorreo - El contenido completo del correo electrónico.
+ * @returns {Object|null} - Un objeto con los datos extraídos o null si ocurre un error.
+ */
 function extraerDatosConMistral(contenidoCorreo) {
   var apiKey = getApiKey("MISTRAL_API_KEY");
-
   var url = 'https://api.mistral.ai/v1/chat/completions';
 
   var archivo = {
@@ -253,21 +311,23 @@ function extraerDatosConMistral(contenidoCorreo) {
     "Category": "Select which category the ticket belongs to: Create, Improve, Adapt, Modify, NOTHING TO DO WITH",
     "Created": "Creation date in the following format: MMM DD, YYYY",
     "Sender": "Name of the person requesting the ticket or email",
-    "Confidence": "Confidence level in related to prompt engineering  (0 to 1)"
+    "Confidence": "Confidence level in related to prompt engineering (0 to 1)"
   };
 
-  var payload = {
-    'model': "mistral-medium", // replace with the appropriate Mistral model
-    'response_format': { type: "json_object" },
-    'messages': [
-      {
-        'role': 'system', 'content': `Your task is to extract relevant information from emails related to prompt engineering and return a JSON object with the extracted data. If the request in the email is not related to prompt engineering, set the "Category" attribute to "NOTHING TO DO WITH".
+  var prompt = `Your task is to extract relevant information from emails related to prompt engineering and return a JSON object with the extracted data. If the request in the email is not related to prompt engineering, set the "Category" attribute to "NOTHING TO DO WITH".
 
 You MUST detect the language of the email and respond in the same language.
 
 Email content:
-"${contenidoCorreo}" and complete the JSON object. Make sure you are responding in the same language as the "Language" attribute.`
-      },
+"${contenidoCorreo}"
+
+Complete the JSON object. Ensure you respond in the same language as the "Language" attribute.`;
+
+  var payload = {
+    'model': "mistral-medium", // Reemplazar con el modelo de Mistral adecuado
+    'response_format': { type: "json_object" },
+    'messages': [
+      { 'role': 'system', 'content': prompt },
       { 'role': 'user', 'content': JSON.stringify(archivo) }
     ]
   };
@@ -282,7 +342,6 @@ Email content:
     'muteHttpExceptions': true
   };
 
-
   try {
     var response = UrlFetchApp.fetch(url, options);
     var result = JSON.parse(response.getContentText());
@@ -292,28 +351,30 @@ Email content:
       var datos = JSON.parse(assistantResponse);
       return datos;
     } else {
-      Logger.log('Unexpected response format from Mistral API: ' + JSON.stringify(result));
+      Logger.log('Formato de respuesta inesperado de Mistral API: ' + JSON.stringify(result));
       return null;
     }
   } catch (e) {
-    Logger.log('Error calling Mistral API: ' + e);
+    Logger.log('Error al llamar a la API de Mistral: ' + e);
     return null;
   }
 }
 
-function getApiKey(key) {
-  return PropertiesService.getScriptProperties().getProperty(key);
-}
-
+/**
+ * Genera una respuesta al correo electrónico utilizando la API de CodeGPT.
+ *
+ * @param {string} contenidoCorreo - El contenido del correo electrónico.
+ * @returns {string|null} - La respuesta generada o null si ocurre un error.
+ */
 function obtenerRespuestaCodeGPT(contenidoCorreo) {
   var apiKey = getApiKey("CODEGPT_API_KEY");
   var agentId = getApiKey("CODEGPT_AGENT_ID");
 
-  const options = {
+  var options = {
     method: 'POST',
     contentType: 'application/json',
     headers: {
-      accept: 'application/json',
+      'accept': 'application/json',
       'authorization': 'Bearer ' + apiKey
     },
     payload: JSON.stringify({
@@ -321,10 +382,12 @@ function obtenerRespuestaCodeGPT(contenidoCorreo) {
       agentId: agentId,
       messages: [{ content: contenidoCorreo, role: 'user' }],
       format: 'json'
-    })
+    }),
+    muteHttpExceptions: true
   };
 
-  const url = 'https://api.codegpt.co/api/v1/chat/completions';
+  var url = 'https://api.codegpt.co/api/v1/chat/completions';
+
   try {
     var response = UrlFetchApp.fetch(url, options);
     var result = JSON.parse(response.getContentText());
@@ -342,12 +405,39 @@ function obtenerRespuestaCodeGPT(contenidoCorreo) {
   }
 }
 
+/**
+ * Convierte texto en formato Markdown a HTML.
+ *
+ * @param {string} markdown - El texto en formato Markdown.
+ * @returns {string} - El texto convertido a HTML.
+ */
 function convertirMarkdownAHTML(markdown) {
   var converter = new showdown.Converter();
-  var html = converter.makeHtml(markdown);
-  return html;
+  return converter.makeHtml(markdown);
+}
+
+/**
+ * Verifica si un ticket con el ID proporcionado ya existe en la hoja de cálculo.
+ *
+ * @param {string} ticketID - El ID del ticket (ID del mensaje).
+ * @returns {boolean} - Retorna true si el ticket existe, false en caso contrario.
+ */
+function ticketExiste(ticketID) {
+  var hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Tickets');
+  var rangoID = hoja.getRange('A:A'); // Columna A donde están los IDs
+  var textFinder = rangoID.createTextFinder(ticketID);
+  var celdaEncontrada = textFinder.findNext();
+
+  return celdaEncontrada !== null;
 }
 
 
-
-
+/**
+ * Obtiene la clave API almacenada en las propiedades del script.
+ *
+ * @param {string} key - El nombre de la propiedad que contiene la clave API.
+ * @returns {string} - La clave API.
+ */
+function getApiKey(key) {
+  return PropertiesService.getScriptProperties().getProperty(key);
+}
